@@ -705,11 +705,16 @@ export class ChatCompressionService {
       lastCurated.parts?.some((part) => !!part.functionCall)
         ? curatedHistory.slice(0, -1)
         : curatedHistory;
-    const pendingHistory = pendingToolResult ? [opts.pendingUserMessage!] : [];
+    const pendingHistory = opts.pendingUserMessage
+      ? [opts.pendingUserMessage]
+      : [];
     // Keep raw pending input intact for replay and compression checkpoints.
-    const visiblePendingHistory = config.getAutoMemoryContext?.()
+    const visiblePendingUserHistory = config.getAutoMemoryContext?.()
       ? pendingHistory
       : withoutAutoMemorySnapshots(pendingHistory);
+    const visiblePendingHistory = pendingToolResult
+      ? visiblePendingUserHistory
+      : [];
     const sideQueryHistory = [...sideQueryBase, ...visiblePendingHistory];
     const pendingToolResultTokenCount = estimateContentTokens(
       visiblePendingHistory,
@@ -1477,11 +1482,11 @@ export class ChatCompressionService {
         }
       }
 
-      // The published count already carries pending results at char/4.
+      // The published count already carries the pending user message at char/4.
       // Apply CJK corrections only to this gate so the inflation guard keeps
       // comparing counts on the same basis as originalTokenCount.
       const pendingTokenCorrection = estimatePostCompactCjkCorrection(
-        visiblePendingHistory,
+        visiblePendingUserHistory,
       );
       const restorationTokenCorrection =
         estimatePostCompactCjkCorrection(restoredHistory);

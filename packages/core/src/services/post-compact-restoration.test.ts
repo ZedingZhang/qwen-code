@@ -29,6 +29,10 @@ import { buildFileRestorationBlocks } from './postCompactAttachments.js';
 import * as tokenEstimation from './tokenEstimation.js';
 import * as postCompactAttachments from './postCompactAttachments.js';
 import * as sideQuery from '../utils/sideQuery.js';
+import {
+  getAutoMemorySnapshot,
+  withoutAutoMemorySnapshots,
+} from '../memory/request-context.js';
 
 vi.mock('../telemetry/loggers.js');
 
@@ -670,6 +674,101 @@ it.each([
         functionCall: expect.objectContaining({ id: 'pending-call' }),
       }),
     );
+  },
+);
+
+it.each([
+  { character: 'x', withUsage: false, kept: 2 },
+  { character: 'x', withUsage: true, kept: 2 },
+  { character: '中', withUsage: false, kept: 0 },
+  { character: '中', withUsage: true, kept: 0 },
+])(
+  'corrects pending plain-text $character input with usage=$withUsage',
+  async ({ character, withUsage, kept }) => {
+    const { files, history, summary, run } = compressionFixture();
+    const pendingUserMessage = userText(character.repeat(3000));
+    const historyTokens = tokenEstimation.estimateContentTokens(history);
+    const pendingTokens = tokenEstimation.estimateContentTokens([
+      pendingUserMessage,
+    ]);
+    const nonVisibleTokens = 7500 + pendingTokens;
+    summary.mockResolvedValue({
+      text: '<state_snapshot>Completed file inspections.</state_snapshot>',
+      ...(withUsage && {
+        usage: {
+          promptTokenCount: historyTokens + 1000,
+          candidatesTokenCount: 100,
+        },
+      }),
+    } as never);
+    const compose = vi.spyOn(
+      postCompactAttachments,
+      'composePostCompactHistory',
+    );
+    const result = await run({
+      trigger: 'auto',
+      pendingUserMessage,
+      originalTokenCount: historyTokens + nonVisibleTokens,
+    });
+    const initialHistory = await compose.mock.results[0].value;
+    const initialCount =
+      nonVisibleTokens +
+      (withUsage
+        ? 100 + tokenEstimation.estimateContentTokens(initialHistory.slice(2))
+        : tokenEstimation.estimateContentTokens(initialHistory));
+    const correction =
+      tokenEstimation.estimateCjkTextTokens(character.repeat(3000)) -
+      pendingTokens;
+    expect(initialCount).toBeLessThan(16_000 - HARD_BUFFER);
+    if (character === '中') {
+      expect(initialCount + correction).toBeGreaterThan(16_000);
+    }
+    expect(
+      files.filter((file) => result.text.includes(file.body)),
+    ).toHaveLength(kept);
+    expect(compose).toHaveBeenCalledTimes(kept === 0 ? 2 : 1);
+    expect(result.info.newTokenCount + correction).toBeLessThan(16_000);
+    expect(pendingUserMessage).toEqual(userText(character.repeat(3000)));
+  },
+);
+
+it.each([
+  { visible: false, withUsage: false },
+  { visible: false, withUsage: true },
+  { visible: true, withUsage: false },
+  { visible: true, withUsage: true },
+])(
+  'matches pending memory visibility=$visible with usage=$withUsage',
+  async ({ visible, withUsage }) => {
+    const { files, history, config, summary, run } = compressionFixture();
+    const snapshot = getAutoMemorySnapshot([], '中'.repeat(3000))!;
+    const pendingUserMessage = content('user', { text: 'continue' }, snapshot);
+    const before = structuredClone(pendingUserMessage);
+    config.getAutoMemoryContext = () => (visible ? 'current catalog' : '');
+    const visiblePending = visible
+      ? [pendingUserMessage]
+      : withoutAutoMemorySnapshots([pendingUserMessage]);
+    const historyTokens = tokenEstimation.estimateContentTokens(history);
+    const nonVisibleTokens =
+      7500 + tokenEstimation.estimateContentTokens(visiblePending);
+    summary.mockResolvedValue({
+      text: '<state_snapshot>Completed file inspections.</state_snapshot>',
+      ...(withUsage && {
+        usage: {
+          promptTokenCount: historyTokens + 1000,
+          candidatesTokenCount: 100,
+        },
+      }),
+    } as never);
+    const result = await run({
+      trigger: 'auto',
+      pendingUserMessage,
+      originalTokenCount: historyTokens + nonVisibleTokens,
+    });
+    expect(
+      files.filter((file) => result.text.includes(file.body)),
+    ).toHaveLength(visible ? 0 : 2);
+    expect(pendingUserMessage).toEqual(before);
   },
 );
 
