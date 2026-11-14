@@ -513,6 +513,15 @@ describe('local provider extension example', () => {
           import.meta.url,
         ),
       );
+      // Pin the proxied-runner scenario instead of depending on the ambient
+      // environment: undici prefers the lowercase variables, so a valid
+      // inherited http_proxy would shadow the invalid uppercase HTTP_PROXY
+      // under test and the example would start instead of failing fast. The
+      // spawned example spreads process.env, so delete the lowercase entries
+      // from its copy; stringEnvironment drops the undefined values.
+      vi.stubEnv('http_proxy', 'http://proxy.invalid:3128');
+      vi.stubEnv('https_proxy', 'http://proxy.invalid:3128');
+      vi.stubEnv('all_proxy', 'http://proxy.invalid:3128');
       for (const [baseUrl, token, httpProxy, stderr] of [
         ['', '', '', 'Provider configuration is unavailable.\n'],
         ['not-a-url', 'secret', '', 'Provider configuration is invalid.\n'],
@@ -526,25 +535,25 @@ describe('local provider extension example', () => {
         await expect(
           execFileAsync(process.execPath, [executable], {
             cwd: exampleRoot,
-            env: {
+            env: stringEnvironment({
               ...process.env,
+              http_proxy: undefined,
+              https_proxy: undefined,
+              all_proxy: undefined,
+              no_proxy: undefined,
               PROVIDER_CONTEXT_BASE_URL: baseUrl,
               PROVIDER_CONTEXT_TOKEN: token,
               HTTP_PROXY: httpProxy,
-              http_proxy: httpProxy,
               HTTPS_PROXY: '',
-              https_proxy: '',
               ALL_PROXY: '',
-              all_proxy: '',
               NO_PROXY: '',
-              no_proxy: '',
-            },
-            timeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
-              ? 15_000
-              : 5_000,
+            }),
+            timeout: 10_000,
           }),
         ).rejects.toMatchObject({ stderr, code: 1, killed: false });
       }
+      // Keep npm pack below off the dead proxy this test pins.
+      vi.unstubAllEnvs();
       const { stdout } = await execFileAsync(
         process.execPath,
         [npmCli, 'pack', '--dry-run', '--json', '--ignore-scripts'],
@@ -568,6 +577,6 @@ describe('local provider extension example', () => {
         manifest.mcpServers['provider-context-local-example']?.args,
       ).toEqual(['${extensionPath}${/}dist${/}main.js']);
     },
-    process.env['RUNNER_NAME']?.startsWith('ecs-qwen-') ? 60_000 : 30_000,
+    30_000,
   );
 });
