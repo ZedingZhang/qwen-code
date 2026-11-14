@@ -383,8 +383,11 @@ modules is enforced without a database by `scripts/check-flyway-migrations.js`,
 which runs in Qwen Code CI on pull requests, pushes, and manual dispatches
 (#12940).
 On `pull_request`, it also requires newly added versions to be strictly above
-the fetched base snapshot's newest version, passed via `FLYWAY_BASE_REF`;
-the `merge_group` path is also wired to fetch the event's pinned
+the fetched base snapshot's newest version, passed via `FLYWAY_BASE_REF`.
+The checkout check permits moving a published migration within the scanned
+locations when its original path is removed and its filename and
+Git-normalized content are preserved.
+The `merge_group` path is also wired to fetch the event's pinned
 `merge_group.base_sha` and enforce the same ordering against that snapshot,
 including on shallow checkouts. That event path remains unexercised while no
 merge queue is enabled. Pushes and manual dispatches without a baseline check

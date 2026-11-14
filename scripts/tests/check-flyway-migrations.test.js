@@ -8,6 +8,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import {
   mkdirSync,
   mkdtempSync,
+  renameSync,
   rmSync,
   unlinkSync,
   writeFileSync,
@@ -169,6 +170,74 @@ describe('check-flyway-migrations', () => {
       } else {
         expect(result.output).toContain('all versions unique');
       }
+    },
+  );
+
+  it.each([
+    ['src/main/resources/db/migration', 'sql', 'server'],
+    ['src/main/resources/db/migration', 'sql', 'broker'],
+    ['src/main/java/db/migration', 'java', 'server'],
+    ['persistence/src/main/resources/db/managed-schema', 'sql', 'server'],
+  ])(
+    'ordering permits an unchanged %s migration moved to %s in %s',
+    (location, suffix, destinationModule) => {
+      const filename = `V64__published.${suffix}`;
+      const original = join(root, 'server', location, filename);
+      mkdirSync(dirname(original), { recursive: true });
+      writeFileSync(original, 'published migration\n');
+      snapshot();
+      const moved = join(
+        root,
+        destinationModule,
+        location,
+        'archive',
+        filename,
+      );
+      mkdirSync(dirname(moved), { recursive: true });
+      renameSync(original, moved);
+
+      const result = check('server', destinationModule);
+      expect(result.status, result.output).toBe(0);
+      expect(result.output).toContain('1 migrations, all versions unique');
+      expect(result.output).not.toContain('ordering not checked');
+    },
+  );
+
+  it.each(['content', 'description', 'copy'])(
+    'ordering rejects a relocation that changes the migration %s',
+    (change) => {
+      const dir = module('server', { sql: ['V64__published.sql'] });
+      const original = join(
+        dir,
+        'src/main/resources/db/migration/V64__published.sql',
+      );
+      writeFileSync(original, 'published migration\n');
+      snapshot();
+      const filename =
+        change === 'description'
+          ? 'V64__replacement.sql'
+          : 'V64__published.sql';
+      const moved = join(
+        dir,
+        'src/main/resources/db/migration/archive',
+        filename,
+      );
+      mkdirSync(dirname(moved), { recursive: true });
+      writeFileSync(
+        moved,
+        change === 'content'
+          ? 'replacement migration\n'
+          : 'published migration\n',
+      );
+      if (change !== 'copy') unlinkSync(original);
+
+      const result = check('server');
+      expect(result.status, result.output).toBe(1);
+      expect(result.output).toContain(
+        change === 'copy'
+          ? 'migrations claim version 64'
+          : 'V64 is not above V64',
+      );
     },
   );
 
@@ -457,29 +526,32 @@ describe('check-flyway-migrations', () => {
     expect(result.output).toContain(
       'found migration files outside src/main/resources/db/migration',
     );
-    // path.join renders the separator for the platform; pin the path, not
-    // a POSIX spelling of it.
-    expect(result.output).toContain(join('scratch', 'V2__b.sql'));
+    expect(result.output).toContain(
+      join('scratch', 'V2__b.sql').replaceAll('\\', '%255C'),
+    );
     expect(result.output).not.toContain('found no migration under');
   });
 
-  it('emits no raw pattern phrase from a hostile migration name', () => {
-    // The ::error:: data channel is runner-decoded where the consumer
-    // parses, so nothing outside a migration path's real alphabet may
-    // survive into it: the suppression phrase in this filename must reach
-    // the log only as inert %XX text, while the real collision is still
-    // reported.
-    const dir = module('server', {
-      sql: [
-        'V16__legit.sql',
-        'V16__x : 2 migrations claim version 99: forged.sql',
-      ],
-    });
-    const result = check(dir);
-    expect(result.status).toBe(1);
-    expect(result.output).toContain('2 migrations claim version 16');
-    expect(result.output).not.toContain('claim version 99');
-  });
+  it.skipIf(!newlineNamesWork)(
+    'emits no raw pattern phrase from a hostile migration name',
+    () => {
+      // The ::error:: data channel is runner-decoded where the consumer
+      // parses, so nothing outside a migration path's real alphabet may
+      // survive into it: the suppression phrase in this filename must reach
+      // the log only as inert %XX text, while the real collision is still
+      // reported.
+      const dir = module('server', {
+        sql: [
+          'V16__legit.sql',
+          'V16__x : 2 migrations claim version 99: forged.sql',
+        ],
+      });
+      const result = check(dir);
+      expect(result.status).toBe(1);
+      expect(result.output).toContain('2 migrations claim version 16');
+      expect(result.output).not.toContain('claim version 99');
+    },
+  );
 
   it('scans a Java-only module for collisions instead of misreading it as moved', () => {
     // No src/main/resources at all: a module carrying only BaseJavaMigration

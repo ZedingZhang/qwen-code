@@ -59,7 +59,7 @@ async function json(route: string, body?: unknown, expected = 200) {
   return text ? JSON.parse(text) : undefined;
 }
 
-async function upstream(route: string, body?: Buffer) {
+async function upstream(route: string, body?: Buffer<ArrayBuffer>) {
   const response = await fetch(new URL(route, config.brokerUrl), {
     method: body?.length ? 'POST' : 'GET',
     headers: {
@@ -121,7 +121,11 @@ const proxy = createServer(async (req, res) => {
     // reload witness starts observing retries.
     if (operation === 'release' && fault.startsWith('release') && dropped > 0)
       await cleanupRetry;
-    if (fault === 'release-before-forward' && operation === 'release') {
+    if (
+      fault === 'release-before-forward' &&
+      operation === 'release' &&
+      fields['drain'] !== true
+    ) {
       dropped++;
       exchanges.push({ operation, fields, reply: {} });
       res.destroy();
@@ -357,6 +361,16 @@ try {
     const rejectLoad = blocked && !retryRelease;
     allowCleanupRetry?.();
     await json(`/session/${sessionId}/detach`, {}, 204);
+    if (fault === 'release-before-forward')
+      assert(
+        exchanges
+          .slice(traffic)
+          .some(
+            (entry) =>
+              entry.operation === 'release' && entry.fields['drain'] === true,
+          ),
+        'Terminal drain must confirm the cleanup before reload',
+      );
     const loaded = await json(
       `/session/${sessionId}/load`,
       {
@@ -375,7 +389,7 @@ try {
         });
         assert.equal(
           (await json(`/session/${sessionId}/status`)).recoveryBlocked,
-          fault === 'release-before-forward',
+          false,
           cli.output,
         );
         const page = await json(
@@ -418,7 +432,10 @@ try {
         );
         assert.deepEqual(entry.fields, {
           ...original.fields,
+          ...(entry.fields['drain'] === true ? { drain: true } : {}),
           requestId: entry.fields['requestId'],
+          // Detach may drain the same binding while paying its cleanup debt.
+          ...(entry.fields['drain'] === true ? { drain: true } : {}),
         });
       }
     } else assert.deepEqual(cleanupRetries, []);

@@ -226,6 +226,11 @@ if (baseRef) {
     isMigrationPath(relativeModules, file),
   );
   const onBase = new Set(baseFiles.map((file) => path.resolve(file)));
+  const removed = new Map(
+    baseFiles
+      .filter((file) => !existsSync(file))
+      .map((file) => [path.posix.basename(file), file]),
+  );
   const newestVersion = baseFiles
     .map((file) => migrationVersion(path.posix.basename(file)))
     .sort(compareMigrationVersions)
@@ -244,6 +249,19 @@ if (baseRef) {
       continue;
     for (const { module, file } of group) {
       if (onBase.has(path.resolve(file))) continue;
+      const previousPath = removed.get(path.basename(file));
+      if (previousPath) {
+        // A pure move preserves the migration name and Git-normalized bytes.
+        const published = execFileSync(
+          'git',
+          ['rev-parse', `${baseRef}:${previousPath}`],
+          { encoding: 'utf8' },
+        ).trim();
+        const current = execFileSync('git', ['hash-object', '--', file], {
+          encoding: 'utf8',
+        }).trim();
+        if (current === published) continue;
+      }
       failed = true;
       outOfOrder.add(module);
       console.error(
