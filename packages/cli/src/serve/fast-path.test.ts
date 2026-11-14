@@ -59,6 +59,7 @@ const originalQwenHome = process.env['QWEN_HOME'];
 const originalHome = process.env['HOME'];
 const originalUserProfile = process.env['USERPROFILE'];
 const originalQwenRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+const originalConversationsDir = process.env['QWEN_CONVERSATIONS_DIR'];
 const originalMcpApprovalsPath = process.env['QWEN_CODE_MCP_APPROVALS_PATH'];
 const originalSystemSettingsPath =
   process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
@@ -367,6 +368,11 @@ afterEach(() => {
   } else {
     process.env['QWEN_RUNTIME_DIR'] = originalQwenRuntimeDir;
   }
+  if (originalConversationsDir === undefined) {
+    delete process.env['QWEN_CONVERSATIONS_DIR'];
+  } else {
+    process.env['QWEN_CONVERSATIONS_DIR'] = originalConversationsDir;
+  }
   if (originalMcpApprovalsPath === undefined) {
     delete process.env['QWEN_CODE_MCP_APPROVALS_PATH'];
   } else {
@@ -531,6 +537,27 @@ describe('CLI entry import boundary', () => {
 });
 
 describe('serve fast path argument parsing', () => {
+  it.each([
+    ['--conversations-dir', '/persistent/Qwen Conversations '],
+    ['--conversations-dir=/persistent/Qwen Conversations '],
+  ])('preserves the Conversations root in %j', (...args) => {
+    expect(parseServeFastPathArgs(['serve', ...args])).toMatchObject({
+      kind: 'serve',
+      options: { conversationsDir: '/persistent/Qwen Conversations ' },
+    });
+  });
+
+  it.each([
+    ['--conversations-dir'],
+    ['--conversations-dir='],
+    ['--conversations-dir', ''],
+    ['--conversations-dir=/one', '--conversations-dir=/two'],
+  ])('defers incomplete or repeated Conversations options %j', (...args) => {
+    expect(parseServeFastPathArgs(['serve', ...args])).toEqual({
+      kind: 'fallback',
+    });
+  });
+
   it('parses the common daemon startup flags without loading the full CLI parser', () => {
     const parsed = parseServeFastPathArgs([
       'serve',
@@ -694,6 +721,7 @@ describe('serve fast path argument parsing', () => {
       ],
       ['max-connections', ['--max-connections', '256']],
       ['event-ring-size', ['--event-ring-size', '8000']],
+      ['event-ring-max-bytes', ['--event-ring-max-bytes', '1048576']],
       [
         'compacted-replay-max-bytes',
         ['--compacted-replay-max-bytes', '4194304'],
@@ -701,6 +729,10 @@ describe('serve fast path argument parsing', () => {
       ['max-journal-events', ['--max-journal-events', '10000']],
       ['max-journal-bytes', ['--max-journal-bytes', '8388608']],
       ['workspace', ['--workspace', process.cwd()]],
+      [
+        'conversations-dir',
+        ['--conversations-dir', '/persistent/conversations'],
+      ],
       ['memory-project-scope', ['--memory-project-scope', 'workspace']],
       ['require-auth', ['--require-auth']],
       ['enable-session-shell', ['--enable-session-shell']],
@@ -856,6 +888,7 @@ describe('serve fast path argument parsing', () => {
     expect(fastPathParsed).not.toHaveProperty('options.maxTotalSessions');
     expect(fastPathParsed).not.toHaveProperty('options.maxConnections');
     expect(fastPathParsed).not.toHaveProperty('options.eventRingSize');
+    expect(fastPathParsed).not.toHaveProperty('options.eventRingMaxBytes');
     expect(fastPathParsed).not.toHaveProperty(
       'options.compactedReplayMaxBytes',
     );
@@ -922,6 +955,48 @@ describe('serve fast path argument parsing', () => {
         options: { memoryBudgetMb: 8192 },
       });
     }
+  });
+
+  it('parses --event-ring-max-bytes on both fast-path flag forms', () => {
+    for (const args of [
+      ['--event-ring-max-bytes', '1048576'],
+      ['--event-ring-max-bytes=1048576'],
+    ]) {
+      expect(parseServeFastPathArgs(['serve', ...args])).toMatchObject({
+        kind: 'serve',
+        options: { eventRingMaxBytes: 1024 * 1024 },
+      });
+    }
+    expect(parseServeFastPathArgs(['serve', '--event-ring-max-bytes'])).toEqual(
+      {
+        kind: 'fallback',
+      },
+    );
+  });
+
+  it.each([
+    0,
+    -1,
+    1.5,
+    Infinity,
+    -Infinity,
+    Number.MAX_SAFE_INTEGER + 1,
+    256 * 1024 * 1024 + 1,
+  ])('rejects fast-path eventRingMaxBytes=%s before startup', async (value) => {
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('process.exit(1)');
+    }) as typeof process.exit);
+    const boot = vi.spyOn(runQwenServeModule, 'runQwenServe');
+    await expect(
+      tryRunServeFastPath(['serve', `--event-ring-max-bytes=${value}`]),
+    ).rejects.toThrow('process.exit(1)');
+    expect(stderrWrites.join('')).toContain('eventRingMaxBytes');
+    expect(boot).not.toHaveBeenCalled();
   });
 
   it('parses --compacted-replay-max-bytes on the fast path', () => {
@@ -1127,6 +1202,69 @@ describe('serve fast path argument parsing', () => {
 });
 
 describe('serve fast path environment bootstrap', () => {
+  it.each(['', '/persistent/Qwen Conversations '])(
+    'preserves a user .env Conversations root %j despite a project .env',
+    async (root) => {
+      const qwenHome = useTempQwenHome();
+      delete process.env['QWEN_CONVERSATIONS_DIR'];
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-conversations-')),
+      );
+      writeFileSync(
+        join(qwenHome, '.env'),
+        `QWEN_CONVERSATIONS_DIR=${JSON.stringify(root)}\n`,
+      );
+      writeFileSync(
+        join(tempWorkspace, '.env'),
+        'QWEN_CONVERSATIONS_DIR=/project/root\nFAST_PATH_REFERENCED_TOKEN=loaded\n',
+      );
+      delete process.env['FAST_PATH_REFERENCED_TOKEN'];
+      preResolveServeFastPathHomeEnvOverrides();
+      expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe(root);
+      await bootstrapServeFastPathEnvironment(tempWorkspace);
+      expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe(root);
+      expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe('loaded');
+    },
+  );
+
+  it('keeps an empty launch root instead of replacing it from home .env', async () => {
+    const qwenHome = useTempQwenHome();
+    process.env['QWEN_CONVERSATIONS_DIR'] = '';
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-conversations-empty-')),
+    );
+    writeFileSync(
+      join(qwenHome, '.env'),
+      'QWEN_CONVERSATIONS_DIR=/home/root\n',
+    );
+    await bootstrapServeFastPathEnvironment(tempWorkspace);
+    expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe('');
+  });
+
+  it.each(['.env', '.qwen/.env'])(
+    'rejects a Conversations root from project %s and settings.env',
+    (file) => {
+      useTempQwenHome();
+      delete process.env['QWEN_CONVERSATIONS_DIR'];
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-conversations-project-')),
+      );
+      const envPath = join(tempWorkspace, file);
+      mkdirSync(dirname(envPath), { recursive: true });
+      writeFileSync(
+        envPath,
+        'QWEN_CONVERSATIONS_DIR=/project/root\nFAST_PATH_REFERENCED_TOKEN=loaded\n',
+      );
+      delete process.env['FAST_PATH_REFERENCED_TOKEN'];
+      loadServeFastPathEnvironment(
+        { env: { QWEN_CONVERSATIONS_DIR: '/settings/root' } },
+        tempWorkspace,
+      );
+      expect(process.env['QWEN_CONVERSATIONS_DIR']).toBeUndefined();
+      expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe('loaded');
+    },
+  );
+
   it('keeps the lite settings directory name in sync with core QWEN_DIR', () => {
     expect(SETTINGS_DIRECTORY_NAME).toBe(QWEN_DIR);
   });
@@ -1927,6 +2065,115 @@ describe('serve fast path environment bootstrap', () => {
     expect(loadServeFastPathSettings(tempWorkspace).serve?.maxSessions).toBe(
       16,
     );
+  });
+
+  it('loads serve.sessionPrWatch from user scope but never from workspace scope', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-pr-watch-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    // A workspace file must not spend daemon-wide gh budget or inject
+    // prompts into sessions across workspaces.
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        serve: { sessionPrWatch: { events: ['head_change'] } },
+      }),
+    );
+    const workspaceScoped = loadServeFastPathSettings(tempWorkspace);
+    expect(workspaceScoped.serve?.sessionPrWatch).toBeUndefined();
+    expect(workspaceScoped.ignoredWorkspaceKeys).toEqual([
+      'serve.sessionPrWatch',
+    ]);
+
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        serve: {
+          sessionPrWatch: { events: ['ci_failure'], wakeDormant: false },
+        },
+      }),
+    );
+    const fromUserScope = loadServeFastPathSettings(tempWorkspace);
+    expect(fromUserScope.serve?.sessionPrWatch).toEqual({
+      events: ['ci_failure'],
+      wakeDormant: false,
+    });
+    // A workspace value stays ignored — and reported — even when an
+    // operator scope also sets the key.
+    expect(fromUserScope.ignoredWorkspaceKeys).toEqual([
+      'serve.sessionPrWatch',
+    ]);
+  });
+
+  it('carries serve.sessionPrWatch through every operator scope merge', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-pr-watch-merge-')),
+    );
+    // Each step merges one more scope over the previous answer. The merge
+    // copies serve keys explicitly, so a key the picker carries but the
+    // merge does not is dropped here rather than at the pick.
+    writeFileSync(
+      process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH']!,
+      JSON.stringify({
+        serve: { sessionPrWatch: { events: ['state_change'] } },
+      }),
+    );
+    expect(
+      loadServeFastPathSettings(tempWorkspace).serve?.sessionPrWatch,
+    ).toEqual({ events: ['state_change'] });
+
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        serve: { sessionPrWatch: { events: ['head_change'] } },
+      }),
+    );
+    expect(
+      loadServeFastPathSettings(tempWorkspace).serve?.sessionPrWatch,
+    ).toEqual({ events: ['head_change'] });
+
+    writeFileSync(
+      process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH']!,
+      JSON.stringify({
+        serve: { sessionPrWatch: { events: ['merge_conflict'] } },
+      }),
+    );
+    expect(
+      loadServeFastPathSettings(tempWorkspace).serve?.sessionPrWatch,
+    ).toEqual({ events: ['merge_conflict'] });
+  });
+
+  it('keeps serve.sessionPrWatch beside the other serve keys in one summary', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-pr-watch-siblings-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({ serve: { channels: ['telegram'] } }),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        serve: {
+          maxSessions: 64,
+          sessionPrWatch: { events: ['head_change'], actions: { fix: 'go' } },
+        },
+      }),
+    );
+
+    // The workspace channels and the operator keys reach one summary
+    // together: neither the pick's presence test nor the merge's spread
+    // may clobber a sibling.
+    expect(loadServeFastPathSettings(tempWorkspace).serve).toEqual({
+      channels: ['telegram'],
+      maxSessions: 64,
+      sessionPrWatch: { events: ['head_change'], actions: { fix: 'go' } },
+    });
   });
 
   it('keeps operator settings when the workspace document cannot be read', () => {
