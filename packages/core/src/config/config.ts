@@ -5850,7 +5850,7 @@ export class Config {
     }
     const fixedTokens =
       policyTokens + (this.autoMemoryCatalogHasContent ? 0 : catalogTokens);
-    if (actions.length === 0 || fixedTokens > thresholdTokens) {
+    if (fixedTokens > thresholdTokens) {
       advice.push(
         'Managed auto-memory adds fixed overhead. Consider disabling managed auto-memory or using a model with a larger context window.',
       );
