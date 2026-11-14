@@ -1353,8 +1353,9 @@ describe('package scripts', () => {
     expect(prepare).toContain("steps.ci_profile.outputs.ci_profile == 'full'");
     expect(prepare).toContain("runner.environment == 'self-hosted'");
     expect(prepare).toContain(
-      'bash .github/scripts/ecs-runner/install-qwen-font-baseline.sh --user-terminal',
+      'installer=.github/scripts/ecs-runner/install-qwen-font-baseline.sh',
     );
+    expect(prepare).toContain('bash "${installer}" --user-terminal');
     expect(prepare).not.toMatch(/^\s+continue-on-error:/m);
     expect(prepare).not.toContain('sudo');
     expect(job.indexOf(prepare)).toBeLessThan(job.indexOf(tests));

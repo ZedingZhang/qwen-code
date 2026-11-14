@@ -350,13 +350,15 @@ for (const failure of [
   });
 }
 
-function runCiFontStep(env, { installer, checker } = {}) {
+function runCiFontStep(env, { installer, checker, terminal = false } = {}) {
   const workflow = readFileSync(
     join(scriptDir, '../../workflows/ci.yml'),
     'utf8',
   );
   const step = workflow.match(
-    /- name: 'Check host font baseline \(self-hosted\)'[\s\S]*?run: \|-\n([\s\S]*?)(?=\n {6}- name:)/,
+    terminal
+      ? /- name: 'Prepare terminal fonts for unit tests'[\s\S]*?run: \|-\n([\s\S]*?)(?=\n {6}(?:- name:|#))/
+      : /- name: 'Check host font baseline \(self-hosted\)'[\s\S]*?run: \|-\n([\s\S]*?)(?=\n {6}- name:)/,
   );
   assert.ok(step, 'the actual CI font step must be present');
   const checkout = join(env.CASE_DIR, 'checkout');
@@ -373,6 +375,38 @@ function runCiFontStep(env, { installer, checker } = {}) {
   const script = join(env.CASE_DIR, 'ci-font-step.sh');
   writeFileSync(script, `set -eo pipefail\n${step[1].replace(/^ {10}/gm, '')}`);
   return run(script, [], { ...env, GITHUB_ACTIONS: 'true' }, checkout);
+}
+
+test('CI skips terminal font preparation for an older installer', () => {
+  withCase({}, (env) => {
+    const result = runCiFontStep(env, {
+      terminal: true,
+      installer:
+        '#!/usr/bin/env bash\nprintf "legacy-installer\\n" >> "$CASE_DIR/calls"\nexit 2\n',
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.calls, '');
+    assert.match(result.stdout, /skipped .*predates --user-terminal/);
+  });
+});
+
+for (const status of [0, 23]) {
+  test(`CI propagates terminal font installer status ${status}`, () => {
+    withCase({}, (env) => {
+      const result = runCiFontStep(env, {
+        terminal: true,
+        installer: [
+          '#!/usr/bin/env bash',
+          '[ "$1" = --user-terminal ] || exit 2',
+          'printf "terminal-installer %s\\n" "$*" >> "$CASE_DIR/calls"',
+          `exit ${status}`,
+          '',
+        ].join('\n'),
+      });
+      assert.equal(result.status, status, result.stderr);
+      assert.equal(result.calls, 'terminal-installer --user-terminal\n');
+    });
+  });
 }
 
 test('CI leaves a healthy runner unmodified', () => {
